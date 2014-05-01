@@ -2,30 +2,43 @@ package net.uaznia.lukanus.hudson.plugins.gitparameter;
 
 import hudson.EnvVars;
 import hudson.Extension;
-import hudson.model.*;
-import hudson.plugins.git.GitException;
-import hudson.plugins.git.GitSCM;
-import hudson.plugins.git.GitTool;
+import hudson.model.ParameterValue;
+import hudson.model.TaskListener;
+import hudson.model.AbstractProject;
+import hudson.model.Hudson;
+import hudson.model.ParameterDefinition;
+import hudson.model.ParametersDefinitionProperty;
+import hudson.plugins.git.GitAPI;
+import hudson.plugins.git.IGitAPI;
 import hudson.plugins.git.Revision;
+import hudson.plugins.git.GitSCM;
 import hudson.scm.SCM;
-import net.sf.json.JSONArray;
-import net.sf.json.JSONObject;
-import org.apache.commons.lang.StringUtils;
-import org.eclipse.jgit.lib.ObjectId;
-import org.eclipse.jgit.transport.RemoteConfig;
-import org.eclipse.jgit.transport.URIish;
-import org.jenkinsci.plugins.gitclient.Git;
-import org.jenkinsci.plugins.gitclient.GitClient;
-import org.kohsuke.stapler.DataBoundConstructor;
-import org.kohsuke.stapler.StaplerRequest;
 
 import java.io.File;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 
-public class GitParameterDefinition extends ParameterDefinition implements
-		Comparable<GitParameterDefinition> {
+import net.sf.json.JSONArray;
+import net.sf.json.JSONObject;
+
+import org.apache.commons.lang.StringUtils;
+import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.transport.RemoteConfig;
+import org.eclipse.jgit.transport.URIish;
+import org.kohsuke.stapler.DataBoundConstructor;
+import org.kohsuke.stapler.StaplerRequest;
+
+
+public class GitParameterDefinition extends ParameterDefinition implements Comparable<GitParameterDefinition> {
 	private static final long serialVersionUID = 9157832967140868122L;
 
 	public static final String PARAMETER_TYPE_TAG = "PT_TAG";
@@ -41,25 +54,38 @@ public class GitParameterDefinition extends ParameterDefinition implements
 		}
 	}
 
+
 	private String type;
 	private String branch;
+	private String tagFilter;
+	private SortMode sortMode;
 
-	private String errorMessage;
-	private String defaultValue;
+	private String errorMessage;        
+	private String defaultValue;        
 
 	private Map<String, String> revisionMap;
 	private Map<String, String> tagMap;
 
 	@DataBoundConstructor
-	public GitParameterDefinition(String name, String type,
-			String defaultValue, String description, String branch) {
+	public GitParameterDefinition(String name,
+			String type, String defaultValue,
+			String description, String branch,
+			String tagFilter, SortMode sortMode
+			) {
 		super(name, description);
 		this.type = type;
 		this.defaultValue = defaultValue;
 		this.branch = branch;
+		this.uuid = UUID.randomUUID();    
+		this.sortMode = sortMode;
 
-		this.uuid = UUID.randomUUID();
+		if (isNullOrWhitespace(tagFilter)) {
+			this.tagFilter = "*";
+		} else {
+			this.tagFilter = tagFilter;
+		}
 	}
+
 
 	@Override
 	public ParameterValue createValue(StaplerRequest request) {
@@ -75,10 +101,11 @@ public class GitParameterDefinition extends ParameterDefinition implements
 		Object value = jO.get("value");
 		String strValue = "";
 		if (value instanceof String) {
-			strValue = (String) value;
-		} else if (value instanceof JSONArray) {
-			JSONArray jsonValues = (JSONArray) value;
-			for (int i = 0; i < jsonValues.size(); i++) {
+			strValue = (String)value;
+		}
+		else if (value instanceof JSONArray) {
+			JSONArray jsonValues = (JSONArray)value;
+			for(int i = 0; i < jsonValues.size(); i++) {
 				strValue += jsonValues.getString(i);
 				if (i < jsonValues.size() - 1) {
 					strValue += ",";
@@ -86,32 +113,32 @@ public class GitParameterDefinition extends ParameterDefinition implements
 			}
 		}
 
-		if ("".equals(strValue)) {
+		if("".equals(strValue)) {
 			strValue = defaultValue;
 		}
 
-		GitParameterValue gitParameterValue = new GitParameterValue(
-				jO.getString("name"), strValue);
+		GitParameterValue gitParameterValue = new GitParameterValue(jO.getString("name"), strValue);
 		return gitParameterValue;
 	}
 
 	@Override
 	public ParameterValue getDefaultParameterValue() {
 		String defValue = getDefaultValue();
-		if (!StringUtils.isBlank(defValue)) {
+		if (!StringUtils.isBlank(defValue)) {                    
 			return new GitParameterValue(getName(), defValue);
 		}
 		return super.getDefaultParameterValue();
 	}
+
 
 	@Override
 	public String getType() {
 		return type;
 	}
 
+
 	public void setType(String type) {
-		if (type.equals(PARAMETER_TYPE_TAG)
-				|| type.equals(PARAMETER_TYPE_REVISION)) {
+		if(type.equals(PARAMETER_TYPE_TAG) || type.equals(PARAMETER_TYPE_REVISION) ) {
 			this.type = type;
 		} else {
 			this.errorMessage = "wrongType";
@@ -127,6 +154,22 @@ public class GitParameterDefinition extends ParameterDefinition implements
 		this.branch = nameOfBranch;
 	}
 
+	public SortMode getSortMode() {
+		return this.sortMode;
+	}
+	
+	public void setSortMode(SortMode sortMode) {
+		this.sortMode = sortMode;
+	}
+
+	public String getTagFilter() {
+		return this.tagFilter;
+	}
+
+	public void setTagFilter(String tagFilter) {
+		this.tagFilter = tagFilter;
+	}
+
 	public String getDefaultValue() {
 		return defaultValue;
 	}
@@ -135,25 +178,22 @@ public class GitParameterDefinition extends ParameterDefinition implements
 		this.defaultValue = defaultValue;
 	}
 
-	public AbstractProject<?, ?> getParentProject() {
-		AbstractProject<?, ?> context = null;
-		List<AbstractProject> jobs = Hudson.getInstance().getItems(
-				AbstractProject.class);
 
-		for (AbstractProject<?, ?> project : jobs) {
-			ParametersDefinitionProperty property = (ParametersDefinitionProperty) project
-					.getProperty(ParametersDefinitionProperty.class);
+	public AbstractProject<?,?> getParentProject() {
+		AbstractProject<?,?> context = null;
+		List<AbstractProject> jobs = Hudson.getInstance().getItems(AbstractProject.class);
 
-			if (property != null) {
-				List<ParameterDefinition> parameterDefinitions = property
-						.getParameterDefinitions();
+		for(AbstractProject<?,?> project : jobs) {
+			ParametersDefinitionProperty property = (ParametersDefinitionProperty) project.getProperty(ParametersDefinitionProperty.class);
 
-				if (parameterDefinitions != null) {
-					for (ParameterDefinition pd : parameterDefinitions) {
+			if(property != null) {
+				List<ParameterDefinition> parameterDefinitions = property.getParameterDefinitions();
 
-						if (pd instanceof GitParameterDefinition
-								&& ((GitParameterDefinition) pd)
-										.compareTo(this) == 0) {
+				if(parameterDefinitions != null) {
+					for(ParameterDefinition pd : parameterDefinitions) {
+
+						if(pd instanceof GitParameterDefinition && 
+								((GitParameterDefinition) pd).compareTo(this) == 0) {
 
 							context = project;
 							break;
@@ -161,148 +201,260 @@ public class GitParameterDefinition extends ParameterDefinition implements
 					}
 				}
 			}
-		}
+		}  
 
 		return context;
 	}
 
 	@Override
 	public int compareTo(GitParameterDefinition pd) {
-		if (pd.uuid.equals(uuid)) {
+		if(pd.uuid.equals(uuid)) {
 			return 0;
 		}
 
 		return -1;
 	}
 
-	public void generateContents(String contenttype) throws IOException,
-			InterruptedException {
 
-		AbstractProject<?, ?> project = getParentProject();
+	public void generateContents(String contenttype) throws IOException, InterruptedException {
 
-		// for (AbstractProject<?,?> project :
-		// Hudson.getInstance().getItems(AbstractProject.class)) {
-		if (project.getSomeWorkspace() == null) {
-			this.errorMessage = "noWorkspace";
-		}
+		AbstractProject<?,?> project = getParentProject();
 
-		SCM scm = project.getScm();
 
-		// if (scm instanceof GitSCM); else continue;
-		if (scm instanceof GitSCM) {
-			this.errorMessage = "notGit";
-		}
+		// for (AbstractProject<?,?> project : Hudson.getInstance().getItems(AbstractProject.class)) {
+			if (project.getSomeWorkspace() == null) {
+				this.errorMessage = "noWorkspace";
+			}                    
 
-		GitSCM git = (GitSCM) scm;
+			SCM scm = project.getScm();
 
-		String defaultGitExe = File.separatorChar != '/' ? "git.exe" : "git";
-
-		hudson.plugins.git.GitTool.DescriptorImpl descriptor = (hudson.plugins.git.GitTool.DescriptorImpl) Hudson
-				.getInstance().getDescriptor(GitTool.class);
-		GitTool[] installations = descriptor.getInstallations();
-
-		for (GitTool gt : installations) {
-			if (gt.getGitExe() != null) {
-				defaultGitExe = gt.getGitExe();
-				break;
+			//if (scm instanceof GitSCM); else continue;
+			if (scm instanceof GitSCM) {
+				this.errorMessage = "notGit";
 			}
-		}
 
-		EnvVars environment = null;
 
-		try {
-			environment = project.getSomeBuildWithWorkspace().getEnvironment(
-					TaskListener.NULL);
-		} catch (Exception e) {
-		}
+			GitSCM git = (GitSCM) scm;
 
-		for (RemoteConfig repository : git.getRepositories()) {
-			for (URIish remoteURL : repository.getURIs()) {
+			String defaultGitExe = File.separatorChar != '/' ? "git.exe" : "git";
+			GitSCM.DescriptorImpl desc = (GitSCM.DescriptorImpl) git.getDescriptor();
+			if (desc.getOldGitExe() != null) {
+				defaultGitExe = desc.getOldGitExe();
+			}
 
-				GitClient newgit = new Git(TaskListener.NULL, environment)
-						.using(defaultGitExe).in(project.getSomeWorkspace())
-						.getClient();
+			EnvVars environment = null;
 
-				// for later use
-				// if(this.branch != null && !this.branch.isEmpty()) {
-				// newgit.checkoutBranch(this.branch, null);
-				// }
+			try {
+				environment = project.getSomeBuildWithWorkspace().getEnvironment(TaskListener.NULL);
+			} catch(Exception e) {}
 
-				try {
-					newgit.fetch_();
-				} catch (GitException ge) {
-					// fetch fails when workspace is empty, run clone
-					newgit.clone_();
-				}
+			for (RemoteConfig repository : git.getRepositories()) {
+				for (URIish remoteURL : repository.getURIs()) {
 
-				if (type.equalsIgnoreCase(PARAMETER_TYPE_REVISION)) {
-					revisionMap = new HashMap<String, String>();
+					IGitAPI newgit = new GitAPI(defaultGitExe, project.getSomeWorkspace(), TaskListener.NULL, environment, new String());
+					// for later use  
+					//        if(this.branch != null && !this.branch.isEmpty()) {
+						//          newgit.checkoutBranch(this.branch, null);
+						//    }
 
-					List<ObjectId> oid;
+					newgit.fetch();
 
-					if (this.branch != null && !this.branch.isEmpty()) {
-						oid = newgit.revList(this.branch);
-					} else {
-						oid = newgit.revListAll();
-					}
+					if(type.equalsIgnoreCase(PARAMETER_TYPE_REVISION)) {
+						revisionMap = new LinkedHashMap<String, String>();
 
-					for (ObjectId noid : oid) {
-						Revision r = new Revision(noid);
-						List<String> test3 = newgit.showRevision(r.getSha1());
-						String[] authorDate = test3.get(3).split(">");
-						String author = authorDate[0].replaceFirst("author ",
-								"").replaceFirst("committer ", "")
-								+ ">";
-						String goodDate = null;
-						try {
-							String totmp = authorDate[1].trim().split("\\+")[0]
-									.trim();
-							long timestamp = Long.parseLong(totmp, 10) * 1000;
-							Date date = new Date();
-							date.setTime(timestamp);
 
-							goodDate = new SimpleDateFormat("yyyy:mm:dd")
-									.format(date);
+						List<ObjectId> oid;   
 
-						} catch (Exception e) {
-							e.toString();
+						if(this.branch != null && !this.branch.isEmpty()) {
+							oid = newgit.revListBranch(this.branch);                        
+						} else {
+							oid = newgit.revListAll();                        
 						}
-						revisionMap.put(r.getSha1String(), r.getSha1String()
-								+ " " + author + " " + goodDate);
-					}
-				} else if (type.equalsIgnoreCase(PARAMETER_TYPE_TAG)) {
-					tagMap = new HashMap<String, String>();
 
-					// Set<String> tagNameList = newgit.getTagNames("*");
-					for (String tagName : newgit.getTagNames("*")) {
-						tagMap.put(tagName, tagName);
-					}
+						for(ObjectId noid: oid) {
+							Revision r = new Revision(noid);
+							List<String> test3 = newgit.showRevision(r);
+							String[] authorDate = test3.get(3).split(">");
+							String author = authorDate[0].replaceFirst("author ", "").replaceFirst("committer ", "") + ">";
+							String goodDate = null;
+							try {
+								String totmp = authorDate[1].trim().split("\\+")[0].trim();
+								long timestamp = Long.parseLong(totmp,10) * 1000;
+								Date date = new Date();
+								date.setTime(timestamp);
+
+								goodDate = new SimpleDateFormat("yyyy:mm:dd").format(date);
+
+
+							} catch (Exception e) {
+								e.toString();
+							}
+							revisionMap.put(r.getSha1String(), r.getSha1String() + " " + author + " " + goodDate);
+						}
+					} else if(type.equalsIgnoreCase(PARAMETER_TYPE_TAG)) {   
+						
+						// use a LinkedHashMap so that keys are ordered as inserted
+						tagMap = new LinkedHashMap<String, String>();
+
+						Set<String> tagSet = newgit.getTagNames(tagFilter);
+						ArrayList<String> orderedTagNames;
+						
+						if (this.getSortMode().getIsSorting()) {
+							orderedTagNames = sortTagNames(tagSet);
+							if (this.getSortMode().getIsDescending())
+								Collections.reverse(orderedTagNames);
+						} else {
+							orderedTagNames = new ArrayList<String>(tagSet);
+						}
+						
+						for(String tagName: orderedTagNames) {
+							tagMap.put(tagName, tagName);
+						}
+					}                                
+
 				}
-
 			}
-		}
-		// }
+			//     }
 
+	}
+
+	public ArrayList<String> sortTagNames(Set<String> tagSet) {
+
+		ArrayList<String> tags = new ArrayList<String>(tagSet);
+
+		if (!this.getSortMode().getIsUsingSmartSort()) {
+			Collections.sort(tags);
+		} else {
+			Collections.sort(tags, new SmartNumberStringComparer());
+		}
+
+		return tags;
 	}
 
 	public String getErrorMessage() {
 		return errorMessage;
 	}
 
-	public Map<String, String> getRevisionMap() throws IOException,
-			InterruptedException {
-		if (revisionMap == null || revisionMap.isEmpty()) {
+	public Map<String, String> getRevisionMap() throws IOException, InterruptedException {
+		if( revisionMap == null || revisionMap.isEmpty()){
 			generateContents(PARAMETER_TYPE_REVISION);
 		}
 		return revisionMap;
 	}
 
-	public Map<String, String> getTagMap() throws IOException,
-			InterruptedException {
-		if (tagMap == null || tagMap.isEmpty()) {
+	public Map<String, String> getTagMap() throws IOException, InterruptedException {
+		if( tagMap == null || tagMap.isEmpty()){
 			generateContents(PARAMETER_TYPE_TAG);
 		}
 		return tagMap;
 	}
 
+	private static boolean isNullOrWhitespace(String s) {
+		return s == null || isWhitespace(s);
+
+	}
+	private static boolean isWhitespace(String s) {
+		int length = s.length();
+		for (int i = 0; i < length; i++) {
+			if (!Character.isWhitespace(s.charAt(i))) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	enum SortMode {
+		NONE,  
+		ASCENDING_SMART, 
+		DESCENDING_SMART,
+		ASCENDING, 
+		DESCENDING;
+
+		public boolean getIsUsingSmartSort() {
+			return this == SortMode.ASCENDING_SMART || this == SortMode.DESCENDING_SMART;
+		}
+		
+		public boolean getIsDescending() {
+			return this == SortMode.DESCENDING || this == SortMode.DESCENDING_SMART;
+		}
+		
+		public boolean getIsSorting() {
+			return this != SortMode.NONE;
+		}
+	}
+	
+	/**
+	 * Compares strings but treats a sequence of digits as a single character.
+	 */
+	static class SmartNumberStringComparer implements Comparator<String> {
+
+		/**
+		 * Gets the token starting at the given index.  It will return the first
+		 * char if it is not a digit, otherwise it will return all consecutive digits
+		 * starting at index.
+		 * @param str The string to extract token from
+		 * @param index The start location
+		 */
+		private String getToken(String str, int index) {
+			char nextChar = str.charAt(index++);
+			String token = String.valueOf(nextChar);
+			
+			// if the first char wasn't a digit then we're already done
+			if (!Character.isDigit(nextChar))
+				return token;
+			
+			// the first char was a digit so continue until end of string or non digit
+			while (index < str.length()) {
+				nextChar = str.charAt(index++);
+				
+				if (!Character.isDigit(nextChar))
+					break;
+				
+				token += nextChar;
+			}
+			
+			return token;
+		}
+		
+		/**
+		 * True if the string only contains digits
+		 */
+		private boolean stringContainsInteger(String str) {
+			for (int charIndex = 0; charIndex < str.length(); charIndex++) {
+				if (!Character.isDigit(str.charAt(charIndex)))
+					return false;
+			}
+			return true;
+		}
+		
+		public int compare(String a, String b) {
+			
+			int aIndex = 0;
+			int bIndex = 0;
+			
+			while (aIndex < a.length() && bIndex < b.length()) {
+				String aToken = getToken(a, aIndex);
+				String bToken = getToken(b, bIndex);
+				int difference;
+				
+				if (stringContainsInteger(aToken) && stringContainsInteger(bToken)) {
+					int aInt = Integer.parseInt(aToken);
+					int bInt = Integer.parseInt(bToken);
+					difference = aInt - bInt;
+				} else {
+					difference = aToken.compareTo(bToken);
+				}
+				
+				if (difference != 0)
+					return difference;
+				
+				aIndex += aToken.length();
+				bIndex += bToken.length();
+			}
+
+			return new Integer(a.length()).compareTo(new Integer(b.length()));
+		}
+
+
+	}
 }
