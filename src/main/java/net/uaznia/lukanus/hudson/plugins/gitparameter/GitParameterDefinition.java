@@ -283,7 +283,7 @@ public class GitParameterDefinition extends ParameterDefinition implements Compa
 								Date date = new Date();
 								date.setTime(timestamp);
 
-								goodDate = new SimpleDateFormat("yyyy:mm:dd").format(date);
+								goodDate = new SimpleDateFormat("yyyy:mm:dd HH:mm:ss").format(date);
 
 
 							} catch (Exception e) {
