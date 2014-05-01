@@ -289,7 +289,7 @@ public class GitParameterDefinition extends ParameterDefinition implements Compa
 							} catch (Exception e) {
 								e.toString();
 							}
-							revisionMap.put(r.getSha1String(), r.getSha1String() + " " + author + " " + goodDate);
+							revisionMap.put(r.getSha1String(), r.getSha1String().substring(0, 8)+ " " + goodDate + " " + author);
 						}
 					} else if(type.equalsIgnoreCase(PARAMETER_TYPE_TAG)) {   
 						
